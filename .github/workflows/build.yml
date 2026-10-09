@@ -1,4 +1,4 @@
-```yaml
+
 name: Build and Package Deployment
 
 on:
@@ -130,5 +130,4 @@ jobs:
           path: reports/change-report.txt
           if-no-files-found: error
           retention-days: 14
-```
 
