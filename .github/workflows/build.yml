@@ -1,4 +1,5 @@
-name: Build Application
+```yaml
+name: Build and Package Deployment
 
 on:
   push:
@@ -6,14 +7,18 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  build-and-package:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -27,16 +32,103 @@ jobs:
           sudo apt-get install -y ant
 
       - name: Build application
-        run: |
-          ant
+        run: ant
 
-      - name: Verify build output
+      - name: Detect file changes
+        id: changes
+        shell: bash
         run: |
-          echo "Build output:"
-          find build -type f
-      - name: Upload build output
+          set -euo pipefail
+
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+
+          mkdir -p reports manifest
+
+          if [[ "$BEFORE" =~ ^0+$ ]] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "No usable previous commit; treating tracked files as added."
+            git diff-tree --no-commit-id --name-only -r "$AFTER" > /tmp/changed.txt
+            git ls-tree -r --name-only "$AFTER" > /tmp/added.txt
+            : > /tmp/modified.txt
+            : > /tmp/deleted.txt
+          else
+            git diff --name-status --no-renames "$BEFORE" "$AFTER" > /tmp/change-status.txt
+
+            awk -F '\t' '$1 == "A" {print $2}' /tmp/change-status.txt > /tmp/added.txt
+            awk -F '\t' '$1 == "M" {print $2}' /tmp/change-status.txt > /tmp/modified.txt
+            awk -F '\t' '$1 == "D" {print $2}' /tmp/change-status.txt > /tmp/deleted.txt
+          fi
+
+          sort -u /tmp/added.txt -o manifest/added.txt
+          sort -u /tmp/modified.txt -o manifest/modified.txt
+          sort -u /tmp/deleted.txt -o manifest/deleted.txt
+
+          {
+            echo "========== ADDED FILES =========="
+            cat manifest/added.txt
+            echo
+            echo "========== MODIFIED FILES =========="
+            cat manifest/modified.txt
+            echo
+            echo "========== DELETED FILES =========="
+            cat manifest/deleted.txt
+          } | tee reports/change-report.txt
+
+      - name: Prepare deployment files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p package/files package/manifest
+
+          # Include only added and modified source files that still exist.
+          cat manifest/added.txt manifest/modified.txt |
+            sort -u |
+            while IFS= read -r file; do
+              [[ -n "$file" ]] || continue
+
+              # Build outputs and GitHub workflow definitions are not
+              # copied as application source files.
+              case "$file" in
+                build/*|.git/*|.github/*|manifest/*|reports/*)
+                  continue
+                  ;;
+              esac
+
+              if [[ -f "$file" ]]; then
+                mkdir -p "package/files/$(dirname "$file")"
+                cp -p -- "$file" "package/files/$file"
+              fi
+            done
+
+          cp manifest/*.txt package/manifest/
+          cp reports/change-report.txt package/manifest/
+
+          # Include the full build output for deployment.
+          cp -a build/dist/. package/files/
+
+          printf 'Commit: %s\n' "$GITHUB_SHA" > package/manifest/build-info.txt
+          printf 'Build date (UTC): %s\n' "$(date -u +%FT%TZ)" >> package/manifest/build-info.txt
+
+      - name: Create deployment ZIP
+        run: |
+          cd package
+          zip -qr ../deployment.zip .
+
+      - name: Upload deployment package
         uses: actions/upload-artifact@v4
         with:
-          name: application-build
-          path: build/dist/
+          name: deployment-package
+          path: deployment.zip
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload change report
+        uses: actions/upload-artifact@v4
+        with:
+          name: change-report
+          path: reports/change-report.txt
+          if-no-files-found: error
+          retention-days: 14
+```
+
